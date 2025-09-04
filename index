@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+    <div class="w-full h-screen bg-black">
+    <canvas id="scene-canvas" class="w-full h-full block"></canvas>
+</div>
+
+{{-- Three.js CDN --}}
+<script src="https://cdn.jsdelivr.net/npm/three@0.164.0/build/three.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // --- Basic setup
+    const canvas = document.getElementById('scene-canvas');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    // Camera
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+    camera.position.set(0, 1.2, 6);
+    scene.add(camera);
+
+    // Resize handler
+    function resize() {
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Lights (soft purple rim + fill)
+    const hemi = new THREE.HemisphereLight(0x8888ff, 0x111122, 0.7);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0x9a6bff, 1.2);
+    dir.position.set(3, 5, 4);
+    scene.add(dir);
+
+    // Materials
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x111115, metalness: 0.9, roughness: 0.25 });
+    const headMat = new THREE.MeshStandardMaterial({ color: 0x7a2cff, metalness: 1.0, roughness: 0.2 });
+
+    // Body (base cube)
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.8, 2.2), bodyMat);
+    body.position.set(0, 0, 0);
+    body.castShadow = body.receiveShadow = true;
+    scene.add(body);
+
+    // Pedestal (optional)
+    const pedestal = new THREE.Mesh(new THREE.BoxGeometry(3, 0.2, 3), bodyMat);
+    pedestal.position.set(0, -0.6, 0);
+    pedestal.receiveShadow = true;
+    scene.add(pedestal);
+
+    // Neck (small cylinder)
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.4, 24), headMat);
+    neck.position.set(0, 0.8, 0);
+    scene.add(neck);
+
+    // Head (cube) — the one that follows the mouse
+    // We group it to rotate around its own pivot above the neck
+    const headGroup = new THREE.Group();
+    headGroup.position.set(0, 1.3, 0); // pivot above the body
+    scene.add(headGroup);
+
+    const head = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1, 1), headMat);
+    head.position.set(0, 0, 0);
+    head.castShadow = true;
+    headGroup.add(head);
+
+    // Simple eyes (emissive spheres)
+    const eyeMat = new THREE.MeshStandardMaterial({ color: 0xeeeeff, emissive: 0x834bff, emissiveIntensity: 0.6, metalness: 0.2, roughness: 0.4 });
+    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 16), eyeMat);
+    const eyeR = eyeL.clone();
+    eyeL.position.set(-0.4, 0.15, 0.51);
+    eyeR.position.set( 0.4, 0.15, 0.51);
+    head.add(eyeL, eyeR);
+
+    // Ground "fake" (subtle ambient plane, not visible but helps cues)
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), new THREE.MeshStandardMaterial({ color: 0x0b0b12 }));
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -0.61;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Raycasting to a virtual plane to get 3D target from mouse
+    const raycaster = new THREE.Raycaster();
+    const mouseNDC = new THREE.Vector2();
+    const targetPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0); // Z=0 plane
+    const targetPoint = new THREE.Vector3();
+    const tmpQuat = new THREE.Quaternion();
+    const targetQuat = new THREE.Quaternion();
+
+    // Limits for head rotation (keep it natural)
+    const MAX_YAW = THREE.MathUtils.degToRad(55);   // left/right
+    const MAX_PITCH = THREE.MathUtils.degToRad(30); // up/down
+    const EASE = 0.12; // smoothing (0..1)
+
+    function onMouseMove(e) {
+        // Convert mouse to NDC
+        const rect = canvas.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        mouseNDC.set(x, y);
+
+        // Cast ray from camera to plane Z=0 → get world point
+        raycaster.setFromCamera(mouseNDC, camera);
+        raycaster.ray.intersectPlane(targetPlane, targetPoint);
+
+        // Compute desired orientation: look from head pivot to target
+        const lookAtPoint = targetPoint.clone();
+        // keep the target not too far behind camera; clamp distance for stability
+        lookAtPoint.clampLength(0, 100);
+
+        // Build a quaternion that "looks at" the target
+        const dir = lookAtPoint.clone().sub(headGroup.position).normalize();
+        const up = new THREE.Vector3(0, 1, 0);
+        tmpQuat.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir); // default head forward is +Z
+
+        // Convert to Euler to clamp yaw/pitch
+        const euler = new THREE.Euler().setFromQuaternion(tmpQuat, 'YXZ');
+        euler.y = THREE.MathUtils.clamp(euler.y, -MAX_YAW, MAX_YAW);     // yaw
+        euler.x = THREE.MathUtils.clamp(euler.x, -MAX_PITCH, MAX_PITCH); // pitch
+        targetQuat.setFromEuler(euler);
+    }
+    window.addEventListener('mousemove', onMouseMove);
+
+    // Initial target = current rotation
+    targetQuat.copy(headGroup.quaternion);
+
+    // Animation loop
+    function tick() {
+        requestAnimationFrame(tick);
+
+        // Smoothly slerp head towards targetQuat
+        headGroup.quaternion.slerp(targetQuat, EASE);
+
+        // Optional idle breathing for body
+        body.position.y = Math.sin(performance.now() * 0.0018) * 0.03;
+
+        renderer.render(scene, camera);
+    }
+    tick();
+
+    // Livewire teardown safety (when component is removed)
+    document.addEventListener('livewire:load', () => {
+        Livewire.hook('element.removed', (el, component) => {
+            if (el.contains(canvas)) {
+                window.removeEventListener('resize', resize);
+                window.removeEventListener('mousemove', onMouseMove);
+                renderer.dispose();
+            }
+        });
+    });
+});
+</script>
+
+</body>
+</html>
